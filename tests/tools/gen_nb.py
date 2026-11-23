@@ -444,7 +444,7 @@ nb3 = [
 
 | 모드 | 구성 | 설명 |
 |---|---|---|
-| 관전 모드 | AI 8명 | 사람은 구경만 한다. 마피아의 밤 대화/의사/경찰 선택도 보인다 |
+| 관전 모드 | AI 8명 | 사람은 구경만 한다. 마피아의 밤 대화/의사/경찰 선택과 **AI 마다의 사고 과정**도 보인다 |
 | 참여 모드 | 사람 1 + AI 7 | 사람 정체 정보만 보인다. 발언, 투표를 직접 입력한다. `?질문`으로 사회자에게 규칙 문의 |
 
 `GameEngine`의 역할 분담 (**LLM은 연기, 진실은 코드가 지킨다**)
@@ -469,17 +469,32 @@ vs = rag.load_db()
 print("===== 벡터 DB 로드 완료 (Chunk %d개) =====" % vs._collection.count())
 '''),
     md('''
-## 1. 관전 모드: AI 8명
+## 1. 관전 모드: AI 8명 + 사고 과정 보기
 
 `build_controllers()`는 플레이어마다 역할에 맞는 도구와 캐릭터 페르소나를 가진 `LLMPlayer`를 만들어 준다.
 **한 판에 수 분이 걸린다.** `SEED`를 바꾸면 다른 역할 배정이 나온다.
+
+`SHOW_THINKING = True`이면 AI가 결정할 때마다 **사고 과정** 상자가 함께 나온다. 챗봇(질문 -> 답변)과 달리,
+각 AI가 *자기 정보만 받고 -> 룰북을 검색하고 -> 도구를 호출해 -> 결정하는* 에이전트라는 것을 눈으로 확인할 수 있다.
+
+| 상자 안의 줄 | 의미 |
+|---|---|
+| 받은 정보(PlayerView) / 나만 아는 정보 | 코드가 골라 준 그 AI 전용 정보 (다른 사람의 직업은 없음) |
+| RAG 검색 | 메타데이터 필터로 읽은 룰북 페이지 (내 역할 전략, 내 캐릭터 프로필) |
+| 도구 호출 / 도구 응답 | `create_agent`가 고른 도구(`choose_kill_target`, `investigate`, `protect`, `vote`)와 인자, 도구의 후보 검사 결과 |
+| 전략 판단(코드) / 몰아가기 감지(코드) | 코드가 상황을 계산해 내린 지시 (예: 경찰이 정체를 밝힐 시점) |
+| 안전장치 작동 / 후처리(코드) | 반복, 자기 이름 3인칭, 없는 밤 행동 언급 등을 감지해 재생성하거나 고친 기록 |
+| 속마음 / 의심도 | 공개 발언과 따로 남는 비공개 추리 (게임이 끝나면 공개) |
+
+> 사고 과정은 다른 사람의 비밀을 보여 주므로 **관전 모드에서만** 켜진다. 사람이 참여하면 자동으로 꺼진다.
 '''),
     code('''
 # ===== 2. 관전 모드 실행 =====
 SEED = 11
+SHOW_THINKING = True   # AI 사고 과정(받은 정보 -> RAG -> 도구 호출 -> 안전장치 -> 결정) 출력. 결과만 보려면 False
 
 state = core.new_game(list(config.CHARACTERS), None, seed=SEED)
-controllers = agents.build_controllers(state, vs)
+controllers = agents.build_controllers(state, vs, show_thinking=SHOW_THINKING)
 engine = core.GameEngine(state, controllers)   # on_event 기본값: 한국어로 출력
 
 t0 = time.time()
@@ -510,7 +525,29 @@ print("정체 노출 차단   :", state.stats["leak_blocked"])
 print("일차당 평균 소요 : %.0f초" % (elapsed / max(state.day, 1)))
 '''),
     md('''
-## 3. 참여 모드: 사람 1 + AI 7
+## 3. 시연용: 녹화된 판 다시 보기
+
+실제 LLM 한 판은 수 분이 걸리고 결과도 매번 다르다. 발표 시간에 맞추기 위해,
+같은 코드(사고 과정 보기 켜짐)로 **미리 진행한 실제 한 판의 출력**을 `data/demo/` 에 저장해 두었다.
+아래 셀은 그 기록을 다시 출력할 뿐이며 LLM을 호출하지 않는다. (실시간 진행은 위의 1번 셀)
+'''),
+    code('''
+# ===== 5. 녹화된 판 재생 (LLM 호출 없음) =====
+import json
+
+DEMO_TXT = config.DATA_DIR / "demo" / "demo_game.txt"     # 진행 화면 그대로
+DEMO_LOG = config.DATA_DIR / "demo" / "demo_game.json"    # save_log() 결과 (역할, 속마음 포함)
+DELAY = 0.05   # 줄 사이 간격(초). 0 이면 한 번에 출력
+
+meta = json.loads(DEMO_LOG.read_text(encoding="utf-8"))
+print("===== 녹화된 판: seed %s, 승자 %s, %s일차에 종료 =====\\n" % (meta["seed"], meta["winner"], meta["day"]))
+for line in DEMO_TXT.read_text(encoding="utf-8").splitlines():
+    print(line, flush=True)
+    if DELAY:
+        time.sleep(DELAY)
+'''),
+    md('''
+## 4. 참여 모드: 사람 1 + AI 7
 
 - 사람의 이름은 `config.HUMAN_NAME`(기본 "서지우", 본인 이름으로 바꿔도 됨), AI는 캐릭터 8명 중 7명이 무작위로 참가한다.
 - 입력 방법: **번호 또는 이름**을 입력한다. 발언은 자유롭게 문장을 입력한다 (빈 입력은 패스).
@@ -520,7 +557,7 @@ print("일차당 평균 소요 : %.0f초" % (elapsed / max(state.day, 1)))
 > 실행하면 입력창이 뜬다. 입력을 하지 않고 넘어가려면 이 셀은 건너뛰어도 된다.
 '''),
     code('''
-# ===== 5. 참여 모드 실행 =====
+# ===== 6. 참여 모드 실행 =====
 HUMAN_SEED = None   # 숫자를 넣으면 같은 배정으로 재현된다
 
 ai_names = random.Random(HUMAN_SEED).sample(config.CHARACTERS, 7)
@@ -532,7 +569,7 @@ h_winner = h_engine.run()
 print("\\n승자:", h_winner)
 '''),
     code('''
-# ===== 6. 참여 모드 결과 공개 =====
+# ===== 7. 참여 모드 결과 공개 =====
 print(core.reveal_report(h_state))
 print("로그:", core.save_log(h_state))
 '''),

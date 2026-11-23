@@ -105,7 +105,44 @@ def test_consistency_guard():
     return check("일관성 검사(후보 제한 재질문) 10판", ok)
 
 
+# =====================================
+# 4. v1.3 발언 보정과 사고 과정 보기 (LLM 없이)
+# =====================================
+def test_speech_fixes_and_trace():
+    import mafia_agents as ag
+    ok = True
+    # 자기 이름 3인칭: 문장 삭제, 경찰 주장 문장은 1인칭으로
+    ok &= ag.fix_self_reference("박준수가 수상해요. 윤서진을 의심해야 합니다.", "윤서진") == "박준수가 수상해요."
+    ok &= ag.fix_self_reference("저 윤서진은 경찰입니다.", "윤서진") == "나는 경찰입니다."
+    # 경찰 주장 감지 ("경찰이 누구지"는 주장이 아님)
+    ok &= bool(ag.CLAIM_RE.search("나는 경찰이야.")) and not ag.CLAIM_RE.search("경찰이 누구지 궁금해요")
+    # 몰아가기 감지
+    today = [{"who": w, "text": "강태호 수상"} for w in ("A", "B", "C")]
+    ok &= ag.pile_on_target(today, ["강태호", "A", "B", "C"]) == ("강태호", 3)
+    # 경찰 주장 목록이 추론 재료에 들어가는가
+    state = core.new_game(list(config.CHARACTERS), None, 3)
+    state.day = 1
+    state.phase = "day"
+    who = state.players[0].name
+    core._log(state, "speech", "나는 경찰입니다. %s는 마피아가 아닙니다." % state.players[1].name, actor=who, phase="day")
+    mat = ag.reasoning_material(core.build_view(state, state.players[2].name, "speak"))
+    ok &= ("경찰이라고 주장한 사람: %s" % who) in mat
+    # 사람이 참여하면 사고 과정 보기는 자동으로 꺼진다 (정보 분리)
+    msgs = []
+    h_state = core.new_game(list(config.CHARACTERS)[:7], config.HUMAN_NAME, 5)
+    ctrls = ag.build_controllers(h_state, None, human_ask_rule=False, show_thinking=True, printer=msgs.append)
+    ok &= all(getattr(c, "trace_out", None) is None for c in ctrls.values()) and len(msgs) == 1
+    # 관전 모드에서는 켜지고, 상자가 출력된다
+    s_ctrls = ag.build_controllers(state, None, human_ask_rule=False, show_thinking=True, printer=msgs.append)
+    pl = s_ctrls[state.players[2].name]
+    pl._steps = ["도구 호출: vote(target='x')"]
+    pl._emit_trace(core.build_view(state, pl.name, "vote"), "vote", "투표: x", compact=True)
+    ok &= "사고 과정" in msgs[-1] and "도구 호출" in msgs[-1]
+    return check("v1.3 발언 보정(3인칭/경찰 주장/몰아가기) + 사고 과정 보기(관전 전용)", ok)
+
+
 if __name__ == "__main__":
-    results = [test_police_facts(), test_graph_partner_proposal(), test_consistency_guard()]
+    results = [test_police_facts(), test_graph_partner_proposal(), test_consistency_guard(),
+               test_speech_fixes_and_trace()]
     print("\n%d/%d 통과" % (sum(results), len(results)))
     sys.exit(0 if all(results) else 1)

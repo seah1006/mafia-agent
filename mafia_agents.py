@@ -75,6 +75,13 @@ class SpeakOut(BaseModel):
 # 3. 코드가 계산하는 "추론 재료" (PlayerView 의 공개 정보만 사용)
 # =====================================
 LINE_RE = re.compile(r"^\[(\d+)일차 (낮|투표|재투표)\] (\S+?)(?:: | -> )(.*)$")
+# 공개 발언 속 "나는 경찰" 같은 경찰 주장
+CLAIM_RE = re.compile(r"(나는|난|저는|전|내가|제가|나|저)\s*(진짜\s*)?경찰|경찰\s*(입니다|이에요|이예요|이야|이다|임|맞)")
+# 밤 행동은 아무도 볼 수 없는데 "밤에 움직였다"처럼 지어내는 환각 문구
+# 첫 토론인데 '어제' 일을 지어내는 표현 -> 같은 날 일로 고친다(재생성보다 빠르고 확실)
+FAKE_PAST_FIX = (("지난 토론", "아까 토론"), ("지난번", "아까"), ("지난날", "아까"), ("지난 날", "아까"), ("앞선 날", "아까"),
+                 ("이전 날", "아까"), ("앞선 투표", "아까"), ("지난 투표", "아까"), ("전날", "아까"), ("어제", "아까"))
+NIGHT_CLAIM_WORDS = ("밤에 움직", "밤에 뭐", "밤에 무엇", "밤에 어디", "밤에 행동", "밤에 나갔", "밤사이 움직", "밤새 움직")
 
 
 def parse_log(view):
@@ -139,10 +146,24 @@ def reasoning_material(view):
     for (day, kind), vs_ in sorted(by_day.items()):
         lines.append("%d일차 %s: " % (day, kind) + ", ".join("%s->%s" % (v["voter"], v["target"]) for v in vs_))
     for d in view.dead:
-        if d.get("cause") == "처형" and d["role_ko"] == "시민":
+        # 시민팀(시민/경찰/의사)이 처형됐다면, 그 사람에게 표를 던진 사람이 수상하다
+        if d.get("cause") == "처형" and d["role_ko"] != "마피아":
             who = sorted({v["voter"] for v in votes if v["target"] == d["name"]})
             if who:
-                lines.append("처형된 시민 %s 에게 투표한 사람: %s" % (d["name"], ", ".join(who)))
+                lines.append("처형된 %s %s 에게 투표한 사람: %s" % (d["role_ko"], d["name"], ", ".join(who)))
+    # 공개된 경찰 주장 목록 (사망하면 직업이 공개되므로 진위도 코드가 알려준다)
+    claims = {}
+    for s in speeches:
+        if CLAIM_RE.search(s["text"]) and s["who"] not in claims:
+            claims[s["who"]] = s
+    dead_role = {d["name"]: d["role_ko"] for d in view.dead}
+    for who, s in claims.items():
+        r = dead_role.get(who)
+        status = ("진짜 경찰로 확인됨(사망 후 직업 공개)" if r == "경찰" else
+                  "거짓 주장으로 확인됨(사망 후 %s로 공개)" % r if r else "아직 진위 미확인")
+        lines.append("경찰이라고 주장한 사람: %s (%d일차, %s) \"%s\"" % (who, s["day"], status, s["text"][:70]))
+    if len(claims) >= 2:
+        lines.append("경찰 주장자가 %d명입니다. 진짜 경찰은 1명뿐이니 나머지는 거짓말(마피아 가능성 높음)입니다." % len(claims))
     today = [s for s in speeches if s["day"] == view.day]
     if view.phase == "day" or today:
         lines.append("오늘 이미 발언한 사람: " + (", ".join(s["who"] for s in today) or "아직 없음(내가 첫 발언)"))
@@ -183,11 +204,47 @@ TOOL_DESC = {
 }
 ACTION_HINT = {
     "kill": "경찰/의사로 보이는 사람, 논리적으로 추리해 주목받는 사람 등 시민팀에 위협이 되는 사람을 노리세요.",
-    "protect": "마피아가 노릴 것 같은 사람(경찰로 보이는 사람, 논리적으로 추리해 주목받는 사람, 또는 자기 자신)을 보호하세요. 의심스러운 사람을 보호하는 것이 아닙니다.",
+    "protect": "마피아가 노릴 것 같은 사람(경찰로 보이는 사람, 논리적으로 추리해 주목받는 사람, 또는 자기 자신)을 보호하세요. 의심스러운 사람을 보호하는 것이 아닙니다. 공개적으로 경찰이라고 밝힌 사람이 있으면 그 사람을 우선 보호하세요.",
     "investigate": "아직 조사하지 않았고 발언이나 투표가 수상한 사람을 고르세요.",
-    "vote": "발언과 투표표를 근거로 마피아일 가능성이 가장 높은 사람에게 투표하세요.",
-    "revote": "발언과 투표표를 근거로 마피아일 가능성이 가장 높은 사람에게 투표하세요.",
+    "vote": "발언과 투표표를 근거로 마피아일 가능성이 가장 높은 사람에게 투표하세요. 공개된 경찰 주장과 조사 결과가 있으면 반드시 고려하세요.",
+    "revote": "발언과 투표표를 근거로 마피아일 가능성이 가장 높은 사람에게 투표하세요. 공개된 경찰 주장과 조사 결과가 있으면 반드시 고려하세요.",
 }
+ACTION_KO = {"kill": "밤 처치", "protect": "밤 보호", "investigate": "밤 조사",
+             "vote": "투표", "revote": "재투표", "speak": "발언"}
+SOURCE_KO = {"agent": "에이전트가 도구를 호출해 결정", "structured": "도구 호출 실패 -> 구조화 출력(Pydantic)으로 결정",
+             "none": "결정 실패 -> 코어가 재시도 후 무작위 대체"}
+
+
+def speakers_mentioning(today, name):
+    """오늘 발언 중 name 을 언급한 사람(본인 제외) 목록."""
+    return sorted({s["who"] for s in today if s["who"] != name and name in s["text"]})
+
+
+def pile_on_target(today, alive):
+    """오늘 3명 이상이 같은 사람을 언급했으면 (그 이름, 인원), 아니면 (None, 0)."""
+    best, cnt = None, 0
+    for n in alive:
+        c = len(speakers_mentioning(today, n))
+        if c > cnt:
+            best, cnt = n, c
+    return (best, cnt) if cnt >= 3 else (None, 0)
+
+
+def replace_self_name(text, name):
+    """자기 이름 3인칭(예: '윤서진은')을 1인칭('나는')으로 바꾼다."""
+    rep = {"은": "나는", "는": "나는", "이": "내가", "가": "내가", "을": "나를", "를": "나를", "의": "나의"}
+    return re.sub(r"(?:(?:저|나)\s+)?" + re.escape(name) + r"(?:님|씨)?(은|는|이|가|을|를|의)?",
+                  lambda m: rep.get(m.group(1) or "", "나"), text)
+
+
+def fix_self_reference(text, name):
+    """자기 이름이 들어간 문장을 지운다(남는 문장이 없거나 경찰 주장 문장이면 1인칭으로 바꾼다)."""
+    sents = [s for s in re.split(r"(?<=[.?!])\s+", text.strip()) if s]
+    kept = [s if name not in s else (replace_self_name(s, name) if "경찰" in s else None) for s in sents]
+    kept = [s for s in kept if s]
+    if kept:
+        return " ".join(kept)
+    return replace_self_name(text, name)
 
 
 class LLMPlayer:
@@ -195,6 +252,7 @@ class LLMPlayer:
 
     _strategy_cache = {}   # 역할 -> 전략 텍스트 (플레이어 간 공유, 호출 절약)
     _persona_cache = {}    # 이름 -> 페르소나 텍스트
+    _strategy_pages = {}   # 역할 -> [(룰북 쪽수, 제목)]  (사고 과정 보기에서 RAG 출처 표시용)
 
     def __init__(self, name, role, vs, llm=None, use_tools=True, state=None, speak_llm=None):
         self.name = name
@@ -210,6 +268,8 @@ class LLMPlayer:
         self._view = None          # read_my_notes 도구가 참조하는 현재 view
         self.last_source = ""      # 마지막 결정 경로: agent / structured / none
         self.consistency_warnings = 0   # 끝까지 일관성을 어긴 횟수(공개 속성)
+        self.trace_out = None      # 사고 과정 출력 함수(print 등). None 이면 출력하지 않는다(관전 모드 전용)
+        self._steps = []           # 이번 결정에서 일어난 일(도구 호출, 안전장치 작동 등)
         self.persona = self._get_persona()
         self.strategy = self._get_strategy()
         self.tools = self._make_common_tools()
@@ -226,13 +286,55 @@ class LLMPlayer:
 
     def _get_strategy(self):
         if self.role not in LLMPlayer._strategy_cache:
+            pages = []
             try:
                 docs = rag.search_strategy(self.vs, self.role, "토론 발언과 투표 전략", k=2)
                 text = "\n".join(d.page_content for d in docs)
+                for d in docs:
+                    p = (d.metadata.get("page", -1) + 1, d.metadata.get("title", ""))
+                    if p not in pages:
+                        pages.append(p)
             except Exception:
                 text = ""
             LLMPlayer._strategy_cache[self.role] = text[:600]
+            LLMPlayer._strategy_pages[self.role] = pages
         return LLMPlayer._strategy_cache[self.role]
+
+    # ----- 4-1b. 사고 과정 보기 (관전 모드 전용) -----
+    def _rag_sources(self, with_persona=False):
+        """이번 판단에 들어간 룰북 페이지(메타데이터 필터 검색 결과)."""
+        out = []
+        pages = LLMPlayer._strategy_pages.get(self.role) or []
+        if pages:
+            out.append("%s (role=%s 필터)" % (", ".join("p.%d %s" % (p, t) for p, t in pages), self.role))
+        if with_persona:
+            for idx, meta in config.PAGE_META.items():
+                if meta.get("name") == self.name:
+                    out.append("p.%d %s (name 필터)" % (idx + 1, meta["title"]))
+        return " / ".join(out) or "없음"
+
+    def _emit_trace(self, view, action, result_line, extra=None, compact=False):
+        """결정 하나의 사고 과정을 상자 모양으로 출력한다. 출력 실패는 게임에 영향을 주지 않는다."""
+        if not self.trace_out:
+            return
+        try:
+            head = "    ┌─ 사고 과정 · %s %s · %s" % (view.role_ko, self.name, ACTION_KO.get(action, action))
+            body = []
+            if compact:
+                body += self._steps
+            else:
+                body.append("받은 정보(PlayerView): 생존 %d명 · 공개 기록 %d줄 · 지난 속마음 %d개 · 후보 %d명" % (
+                    len(view.alive), len((view.public_log_text or "").splitlines()), len(view.my_notes), len(view.candidates)))
+                body.append("나만 아는 정보: " + (" / ".join(view.private_info) or "없음"))
+                if view.partner_proposal:
+                    body.append("동료 마피아의 제안: %s" % view.partner_proposal.get("target"))
+                body.append("RAG 검색: " + self._rag_sources(with_persona=(action == "speak")))
+                body += self._steps
+            body += list(extra or [])
+            lines = [head] + ["    │ " + b for b in body] + ["    └─ " + result_line]
+            self.trace_out("\n".join(lines))
+        except Exception:
+            pass
 
     # ----- 4-2. 공통 도구 -----
     def _make_common_tools(self):
@@ -316,6 +418,9 @@ class LLMPlayer:
         task = ACTION_INFO[action][1] + " " + ACTION_HINT[action]
         if action == "kill" and view.partner_proposal:
             task += " 동료 제안에 동의하더라도 reason 은 복사하지 말고 당신의 말로 20자 안팎으로 새로 쓰세요."
+        if view.phase == "night" and not (view.public_log_text or "").count("일차 낮]"):
+            # 첫날 밤에는 아무도 말한 적이 없다. 이유에 없는 발언/행동을 지어내지 않게 한다.
+            task += " 아직 아무도 발언하거나 투표한 적이 없습니다. reason 에 있지도 않은 발언이나 행동을 지어내지 말고, 캐릭터 성향이나 전략을 근거로 쓰세요."
         if warning:
             task += " " + warning
         base = (self._view_text(view) + "\n\n후보: " + ", ".join(cands) + "\n"
@@ -328,12 +433,16 @@ class LLMPlayer:
                     tools=[self._make_action_tool(action, holder, cands)],
                     system_prompt=self._system_prompt(view),
                 )
-                agent.invoke({"messages": [("user", base + " 도구를 정확히 한 번 호출하세요.")]}, config=self.cfg)
+                res = agent.invoke({"messages": [("user", base + " 도구를 정확히 한 번 호출하세요.")]}, config=self.cfg)
+                self._record_tool_calls(res)
             except Exception:
                 holder = {}
+                self._steps.append("에이전트 호출 오류 -> 구조화 출력으로 다시 질문")
             if holder.get("target") in cands:
                 self.last_source = "agent"
                 return holder["target"], holder.get("reason", "")
+            if not any("오류" in s for s in self._steps):
+                self._steps.append("유효한 도구 호출 없음 -> 구조화 출력(Pydantic)으로 다시 질문")
         # 폴백: 구조화 출력
         try:
             out = self.llm.with_structured_output(TargetChoice).invoke(
@@ -349,14 +458,27 @@ class LLMPlayer:
         self.last_source = "none"
         return None
 
+    def _record_tool_calls(self, res):
+        """에이전트 실행 결과 메시지에서 도구 호출과 도구 응답을 뽑아 사고 과정에 남린다."""
+        for m in (res or {}).get("messages", []):
+            for tc in getattr(m, "tool_calls", None) or []:
+                args = tc.get("args") or {}
+                self._steps.append("도구 호출: %s(target=%r)" % (tc.get("name"), args.get("target")))
+            if getattr(m, "type", "") == "tool":
+                self._steps.append("  └ 도구 응답: " + str(m.content)[:60])
+
     def night_action(self, view):
         action = {"mafia": "kill", "police": "investigate", "doctor": "protect"}.get(view.role)
         if action is None:
             return None
+        self._steps = []
         res = self._decide(view, action)
         if res is None:
+            self._emit_trace(view, action, "결정: 없음 (" + SOURCE_KO["none"] + ")")
             return None
         target, reason = res
+        self._emit_trace(view, action, "결정: %s (%s)" % (target, SOURCE_KO.get(self.last_source, self.last_source)),
+                         extra=["이유: " + reason[:80]] if reason else None)
         # 두 번째 마피아가 동료 이유를 그대로 복사하면 짧은 자기 말로 바꾼다
         pp = view.partner_proposal
         if action == "kill" and pp and reason.strip() == str(pp.get("reason", "")).strip():
@@ -378,12 +500,15 @@ class LLMPlayer:
 
     def vote(self, view):
         action = "revote" if view.phase == "revote" else "vote"
+        self._steps = []
         res = self._decide(view, action)
         if res is None:
+            self._emit_trace(view, action, "결정: 없음 (" + SOURCE_KO["none"] + ")", compact=True)
             return None
         target, reason = res
         warn = self._violation(view, target)
         if warn:
+            self._steps.append("일관성 검사 작동: %s 투표는 확정 정보와 모순 -> 후보에서 빼고 재질문" % target)
             CONSISTENCY["retried"] += 1
             # 재질문 때는 확정 정보와 모순되는 사람(마피아의 동료, 경찰이 확인한 시민)을 후보에서 뺀다.
             partners, cleared, _ = private_facts(view)
@@ -397,26 +522,46 @@ class LLMPlayer:
             if self._violation(view, target):
                 CONSISTENCY["violations"] += 1
                 self.consistency_warnings += 1
+        self._emit_trace(view, action, "투표: %s (%s)" % (target, SOURCE_KO.get(self.last_source, self.last_source)),
+                         extra=["근거: " + reason[:80]] if reason else None, compact=True)
         return VoteDecision(target=target, reason=reason)
 
     # ----- 4-6. 발언 : 구조화 출력 한 번 -----
-    def _speak_prompt(self, view):
+    def _police_should_claim(self, view, today):
+        """경찰이 지금 정체와 조사 결과를 공개해야 하는가.
+        마피아를 찾았거나, 확인된 시민이 있는데 2일차 이후이거나, 오늘 2명 이상에게 의심받고 있으면 공개한다."""
+        if view.role != "police":
+            return False
+        _p, cleared, found = private_facts(view)
+        under_fire = len(speakers_mentioning(today, self.name)) >= 2
+        return bool(found) or (bool(cleared) and (view.day >= 2 or under_fire))
+
+    def _speak_prompt(self, view, today, claim_now):
         others = [n for n in view.alive if n != self.name]
         partners, cleared, found = private_facts(view)
         if view.day <= 1 and len(view.dead) <= 1:
             day_guide = ("첫날 가이드: 정보가 적으니 성향대로 첫 의심이나 질문을 던지세요. 앞 발언자가 있으면 그 1명의 실제 말에 이름을 부르며 반응하고,"
                          " 없으면 특정인에게 질문하세요. 사망 사실을 되풀이하지 마세요(모두 압니다).")
         else:
-            day_guide = "투표표와 처형된 시민에게 투표한 사람 같은 추론 재료를 근거로 구체적으로 말하세요."
+            day_guide = "투표표와 처형된 사람에게 투표한 사람, 경찰 주장 같은 추론 재료를 근거로 구체적으로 말하세요."
         role_guide = ""
-        if view.role == "police":
+        if view.role == "police" and claim_now:
+            results = ["%s는 마피아" % n for n in found] + ["%s는 마피아가 아님" % n for n in cleared]
+            role_guide = (" 지금은 정체를 밝힐 때입니다. goal 은 정보공개로 하고, '나는 경찰이다'라고 말한 뒤 조사 결과(%s)를 공개하세요."
+                          % ", ".join(results))
             if found:
-                role_guide = " goal 은 정보공개로 하고, 마피아로 확정된 %s 의 조사 결과를 공개하고 투표로 몰아가세요." % ", ".join(found)
-            elif cleared and view.day >= 2:
-                role_guide = " 확인된 시민 %s 을(를) 변호하거나, 필요하면 경찰임을 밝히고 조사 결과를 공개하는 것을 고려하세요." % ", ".join(cleared)
+                role_guide += " 그리고 %s 에게 투표하자고 하세요." % ", ".join(found)
         if view.role == "mafia":
             role_guide = " 동료 %s 은(는) 의심하지 말고 시민 중 한 명을 그럴듯한 근거로 지목하세요. 마피아임을 드러내면 안 됩니다." % (
                 ", ".join(partners) or "마피아")
+        # 몰아가기 방지: 오늘 3명 이상이 이미 같은 사람을 언급했으면 같은 말 반복 대신 새 관점을 요구
+        pile, cnt = pile_on_target(today, view.alive)
+        pile_guide = ""
+        if pile == self.name:
+            pile_guide = "\n9) 오늘 %d명이 나를 의심했습니다. 감정적으로 반박하지 말고 내 결백 근거를 말하거나, 나를 몰아가는 사람 중 한 명을 지목하세요." % cnt
+        elif pile:
+            pile_guide = ("\n9) 오늘 이미 %d명이 %s 을(를) 언급했습니다. 같은 질문/의심을 되풀이하지 마세요. 동의한다면 아직 아무도 말하지 않은 새 근거를, "
+                          "아니라면 다른 사람을 지목하세요." % (cnt, pile))
         return ("\n\n[내 역할 전략]\n" + self.strategy[:150] + "\n\n"
                 "[발언 규칙]\n"
                 "1) 목표(goal)를 하나 고르세요: 지목(특정인 1명 이름+구체 근거) / 변호(누군가 옹호) / 질문(특정인에게) / 정보공개.\n"
@@ -426,28 +571,39 @@ class LLMPlayer:
                 "5) 다른 사람이 한 말/행동은 [오늘 이미 나온 발언]과 [공개 기록]에 실제로 있는 것만 인용하세요. 없는 일(누가 누구를 의심했다 등)을 지어내면 안 됩니다.\n"
                 "6) 2~3문장, %d자 이내. suspicion 에는 %s 각각의 의심도(0~100)를 적으세요.\n"
                 "7) 당신은 %s입니다. 자기 자신을 이름(%s)으로 부르거나 의심하지 마세요. '나'라고 말하세요.\n"
-                "8) 지목/의심 대상은 살아있는 사람(%s) 중에서만 고르세요. 죽은 사람은 지목 대상이 아닙니다."
-                % (config.SPEECH_MAX_CHARS, ", ".join(others), self.name, self.name, ", ".join(others)))
+                "8) 지목/의심 대상은 살아있는 사람(%s) 중에서만 고르세요. 죽은 사람은 지목 대상이 아닙니다. "
+                "밤에 누가 무엇을 했는지는 아무도 볼 수 없으니 '밤에 움직였다' 같은 말은 근거가 될 수 없습니다.\n"
+                "thought 는 speech 와 다른 문장으로, 남에게 말하지 않는 진짜 판단(마피아라면 실제 의도와 위장 계획)을 쓰세요."
+                % (config.SPEECH_MAX_CHARS, ", ".join(others), self.name, self.name, ", ".join(others)) + pile_guide)
 
     def speak(self, view):
         self._view = view
+        self._steps = []
         others = [n for n in view.alive if n != self.name]
         sys_msg = (self._system_prompt(view) +
                    "[내 캐릭터 설정]\n" + self.persona + "\n"
                    "말투와 성격을 캐릭터답게 유지하세요.")
         speeches, _ = parse_log(view)
         today = [s for s in speeches if s["day"] == view.day]
+        claim_now = self._police_should_claim(view, today)
         today_text = "\n".join("%s: %s" % (s["who"], s["text"]) for s in today) or "아직 없음(내가 첫 발언자)"
-        user_msg = (self._view_text(view) + "\n\n[오늘 이미 나온 발언]\n" + today_text + self._speak_prompt(view))
+        user_msg = (self._view_text(view) + "\n\n[오늘 이미 나온 발언]\n" + today_text + self._speak_prompt(view, today, claim_now))
+        if claim_now:
+            self._steps.append("전략 판단(코드): 경찰 정체와 조사 결과를 공개할 시점 -> 정보공개 지시")
+        pile, cnt = pile_on_target(today, view.alive)
+        if pile:
+            self._steps.append("몰아가기 감지(코드): 오늘 %d명이 %s 언급 -> 같은 말 반복 금지 지시" % (cnt, pile))
         best, best_pen = None, None
         for attempt in range(2):
             try:
                 out = self.speak_llm.with_structured_output(SpeakOut).invoke(
                     [("system", sys_msg), ("user", user_msg)], config=self.cfg)
             except Exception:
+                self._steps.append("%d차 생성: 형식 오류 -> 재생성" % (attempt + 1))
                 continue
             text = (out.speech or "").strip()
             if not text or mafia_core.contains_role_leak(text, view.role):
+                self._steps.append("%d차 생성: 정체 노출/빈 답변 감지 -> 재생성" % (attempt + 1))
                 user_msg += " (이전 답변은 정체를 노출했거나 비어 있었습니다. 다시 작성하세요.)"
                 continue
             # 오늘 나온 남의 발언 + 내가 지난날 한 발언과 비교 (날을 넘겨 같은 말 반복 방지)
@@ -456,38 +612,67 @@ class LLMPlayer:
             has_name = any(n in text for n in others)
             self_ref = self.name in text   # 자기 이름을 3인칭으로 부르는 실수
             # 첫 토론인데 '어제/지난번' 일을 지어내는 환각
-            fake_past = (not any(s["day"] < view.day for s in speeches)) and any(
-                w in text for w in ("어제", "지난번", "지난 토론", "전날", "앞선 날", "이전 날", "지난날", "지난 날", "앞선 투표", "지난 투표"))
+            # (재생성하지 않고 아래 후처리에서 '아까'로 고친다)
+            first_talk = not any(s["day"] < view.day for s in speeches)
+            fake_past = first_talk and any(w in text for w, _r in FAKE_PAST_FIX)
+            # 아무도 볼 수 없는 밤 행동을 근거로 대는 환각
+            night_claim = any(w in text for w in NIGHT_CLAIM_WORDS)
+            # 경찰이 공개해야 할 때 공개하지 않음
+            missing_claim = claim_now and not CLAIM_RE.search(text)
             # 문제가 적을수록 점수가 낮다. 두 번 시도 중 가장 나은 발언을 쓴다.
-            pen = sim + (0 if has_name else 0.5) + (0.5 if self_ref else 0) + (0.5 if fake_past else 0)
+            pen = (sim + (0 if has_name else 0.5) + (0.5 if self_ref else 0) + (0.1 if fake_past else 0)
+                   + (0.5 if night_claim else 0) + (0.5 if missing_claim else 0))
             if best is None or pen < best_pen:
                 best, best_pen = out, pen
-            if has_name and sim < 0.6 and not self_ref and not fake_past:
+            if has_name and sim < 0.6 and not self_ref and not night_claim and not missing_claim:
                 break
             CONSISTENCY["repeat_retries"] += 1
-            if fake_past:
-                why = "오늘이 첫 토론인데 없던 '어제' 일을 지어냈습니다. [오늘 이미 나온 발언]에 있는 내용만 인용하세요"
+            if night_claim:
+                why, short = "아무도 볼 수 없는 밤 행동('밤에 움직였다' 등)을 근거로 댔습니다. 발언과 투표만 근거로 쓰세요", "볼 수 없는 밤 행동을 근거로 씀"
             elif self_ref:
-                why = "자기 이름(%s)을 3인칭으로 불렀습니다. 자신은 '나'라고 하세요" % self.name
+                why, short = "자기 이름(%s)을 3인칭으로 불렀습니다. 자신은 '나'라고 하세요" % self.name, "자기 이름 3인칭"
+            elif missing_claim:
+                why, short = "경찰임을 밝히고 조사 결과를 공개하라는 지시를 따르지 않았습니다. '나는 경찰이다'로 시작하세요", "경찰 정보공개 누락"
             elif not has_name:
-                why = "살아있는 다른 사람 이름이 없었습니다"
+                why, short = "살아있는 다른 사람 이름이 없었습니다", "다른 사람 이름 없음"
             else:
-                why = "앞 발언과 너무 비슷했습니다"
+                why, short = "앞 발언과 너무 비슷했습니다", "앞 발언과 유사도 %.2f" % sim
+            self._steps.append("%d차 생성: 안전장치 작동(%s) -> 재생성" % (attempt + 1, short))
             user_msg += " (이전 답변은 %s. 앞 발언과 다른 새 근거로, 다른 사람 이름을 넣어 다시 작성하세요.)" % why
         if best is None:
+            self._emit_trace(view, "speak", "발언 생성 실패 -> 중립 문장")
             return Speech(text="아직은 판단하기 어렵네요. 조금 더 지켜보겠습니다.", thought="(발언 생성 실패)")
         sus = {}
         for it in best.suspicion:
             if it.name in others:
                 sus[it.name] = max(0, min(100, int(it.score)))
         text = best.speech.strip()
+        if not any(s["day"] < view.day for s in speeches) and any(w in text for w, _r in FAKE_PAST_FIX):
+            for w, r in FAKE_PAST_FIX:
+                text = text.replace(w, r)
+            self._steps.append("후처리(코드): 첫 토론인데 '어제' 표현 -> 같은 날 '아까'로 교정")
+        if self.name in text:
+            text = fix_self_reference(text, self.name)
+            self._steps.append("후처리(코드): 자기 이름 3인칭 문장 정리")
         if len(text) > config.SPEECH_MAX_CHARS:
             # 단어 중간에서 끊기지 않도록 마지막 문장 끝(. ? !)까지만 남긴다
             cut = text[:config.SPEECH_MAX_CHARS]
             ends = [cut.rfind(t) + 1 for t in (".", "?", "!") if cut.rfind(t) != -1]
             end = max(ends) if ends else 0
             text = cut[:end] if end >= config.SPEECH_MAX_CHARS // 2 else cut.rstrip()
-        return Speech(text=text, thought=best.thought, suspicion=sus)
+        thought = (best.thought or "").strip()
+        if not thought or bigram_sim(thought, best.speech or "") >= 0.6:
+            # 속마음이 공개 발언을 그대로 베꼈으면 의심도와 목표로 코드가 요약한다(없는 생각을 지어내지 않음)
+            top = sorted(sus.items(), key=lambda kv: -kv[1])[:2]
+            thought = "[코드 요약] 의심 순위: %s / 발언 목표: %s" % (
+                ", ".join("%s %d" % kv for kv in top) or "없음", best.goal)
+            self._steps.append("후처리(코드): 속마음이 발언과 같아서 의심도 요약으로 대체")
+        top3 = sorted(sus.items(), key=lambda kv: -kv[1])[:3]
+        self._emit_trace(view, "speak", "발언 목표: %s" % best.goal, extra=[
+            "속마음(비공개): " + thought[:90],
+            "의심도(비공개): " + (", ".join("%s %d" % kv for kv in top3) or "없음"),
+        ])
+        return Speech(text=text, thought=thought, suspicion=sus)
 
 
 # =====================================
@@ -539,8 +724,15 @@ class Moderator:
 # =====================================
 # 6. 컨트롤러 생성
 # =====================================
-def build_controllers(state, vs, human_ask_rule=True):
-    """플레이어 이름 -> Controller. AI 는 LLMPlayer, 사람은 HumanController."""
+def build_controllers(state, vs, human_ask_rule=True, show_thinking=False, printer=print):
+    """플레이어 이름 -> Controller. AI 는 LLMPlayer, 사람은 HumanController.
+
+    show_thinking=True : 관전 모드에서 AI 의 사고 과정(받은 정보 -> RAG -> 도구 호출 -> 안전장치 -> 결정)을 출력한다.
+    사람이 참여하는 판에서는 비밀 정보가 보이면 안 되므로 자동으로 땈다(정보 분리 원칙).
+    """
+    if show_thinking and any(p.is_human for p in state.players):
+        printer("[알림] 사람이 참여하는 판에서는 사고 과정 보기를 끕니다(다른 사람의 비밀이 보이기 때문).")
+        show_thinking = False
     act_llm = make_llm(ACT_TEMPERATURE)       # 판단용(밤 행동/투표)
     speak_llm = make_llm(SPEAK_TEMPERATURE)   # 발언용
     mod = Moderator(vs) if human_ask_rule else None
@@ -551,4 +743,6 @@ def build_controllers(state, vs, human_ask_rule=True):
                 p.name, ask_rule=(mod.explain_rule if mod else None))
         else:
             ctrls[p.name] = LLMPlayer(p.name, p.role, vs, llm=act_llm, state=state, speak_llm=speak_llm)
+            if show_thinking:
+                ctrls[p.name].trace_out = printer
     return ctrls
