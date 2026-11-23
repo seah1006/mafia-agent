@@ -1,4 +1,4 @@
-# 실습실 PC (Python 3.11.9, My_Langchain\venv) 에 실제 설치되어 테스트한 버전
+# Tested with Python 3.11.9 (Windows).
 langchain==1.5.0
 langchain-core==1.8.1
 langchain-community==0.4.2
