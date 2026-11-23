@@ -817,8 +817,123 @@ print("총 소요: %.0f초 (판당 %.0f초)" % (time.time() - t0, (time.time() -
 '''),
 ]
 
+# =====================================================
+# 05_ask_agent
+# =====================================================
+nb5 = [
+    md("""
+# 05. 질문에 답하는 에이전트 (RAG 질의응답)
+
+**목적**: 사용자가 질문하면 에이전트가 **RAG 로 근거를 찾아 출처와 함께 답한다.**
+
+| 부분 | 무엇을 검색하나 | 어떻게 답하나 |
+|---|---|---|
+| 1. 사회자 (`Moderator`) | 룰북 PDF 의 규칙 페이지 (`type=rule` 필터) | 검색한 발췌만 근거로 답하고 출처 페이지를 붙인다. 룰북에 없으면 모른다고 한다 |
+| 2. 해설 에이전트 (`mafia_qa.GameQA`) | 룰북 + **끝난 게임의 기록**(발언, 투표, 밤 행동, 속마음) | `create_agent` 가 질문에 맞는 **도구를 스스로 골라** 검색한 뒤 근거를 붙여 답한다 |
+
+03 노트북의 AI 8명은 같은 RAG 를 "행동"에 쓰고, 이 노트북의 에이전트는 "질문에 답하는 데" 쓴다.
+"""),
+    code(CWD_CELL),
+    code('''
+# ===== 1. 준비 =====
+import json
+
+import rag
+import mafia_agents as agents
+import mafia_qa
+
+vs = rag.load_db()
+print("===== 룰북 벡터 DB 로드 완료 (Chunk %d개) =====" % vs._collection.count())
+'''),
+    md("""
+## 1. 사회자: 룰북 RAG 질의응답
+
+질문 -> `rag.search_rules()` (메타데이터 필터 `type=rule`, 상위 3개) -> LLM 이 발췌만 근거로 3문장 이내 답변 -> 출처 페이지 표시.
+마지막 질문처럼 룰북에 없는 내용은 지어내지 않고 모른다고 답하는지 확인한다.
+"""),
+    code('''
+# ===== 2. 사회자에게 규칙 질문 =====
+moderator = agents.Moderator(vs)
+
+questions = [
+    "의사는 자기 자신을 보호할 수 있나요?",
+    "투표에서 동점이 나오면 어떻게 되나요?",
+    "마피아는 언제 이기나요?",
+    "이 게임에서 우승하면 상금이 있나요?",   # 룰북에 없는 질문
+]
+for q in questions:
+    docs = rag.search_rules(vs, q, k=3)
+    print("[질문]", q)
+    print("   검색된 페이지:", ", ".join("p.%d %s" % (d.metadata["page"] + 1, d.metadata["title"]) for d in docs))
+    print("[사회자]", moderator.explain_rule(q))
+    print()
+'''),
+    md("""
+## 2. 해설 에이전트: 질문에 맞는 지식을 스스로 골라 검색
+
+게임이 끝나면 그 판의 기록을 문서로 나눠 **두 번째 벡터 DB**(메모리 Chroma, bge-m3)에 넣는다.
+에이전트(`create_agent`)는 질문을 보고 아래 도구 중 필요한 것을 골라 호출한다.
+
+| 도구 | 검색 대상 | 쓰이는 질문 예 |
+|---|---|---|
+| `search_rulebook` | 룰북 RAG (`type=rule`) | "의사는 자기 자신을 보호해도 돼?" |
+| `search_game_log` | 이번 판 기록 RAG (메타데이터 `kind`/`day`/`actor`/`target` 로 사람별 필터) | "마피아는 왜 박준수를 노렸어?" |
+| `player_summary` | 코드가 계산한 사실 (역할, 득표, 밤 행동, 조사 결과) | "경찰은 누구를 조사했고 결과가 뭐였어?" |
+
+- 게임 기록에는 밤 행동과 속마음 같은 **비밀이 들어 있어서, 게임이 끝난 뒤에만** 만든다 (`from_state()` 는 진행 중인 게임이면 거부한다).
+- 에이전트가 도구를 쓰지 않고 답하려 하면, 코드가 두 저장소를 모두 검색해 근거를 준 뒤 다시 답하게 한다.
+- 여기서는 `data/demo/` 에 저장된 실제 한 판(시민팀 2일차 승리)에 대해 질문한다.
+"""),
+    code('''
+# ===== 3. 끝난 게임으로 해설 에이전트 만들기 =====
+qa = mafia_qa.GameQA.from_file(vs, config.DATA_DIR / "demo" / "demo_game.json")
+
+kinds = {}
+for m in qa.game_vs.get()["metadatas"]:
+    kinds[m["kind"]] = kinds.get(m["kind"], 0) + 1
+print("===== 게임 기록 벡터 DB: 문서 %d개 =====" % sum(kinds.values()))
+print("종류별:", kinds)   # role / speech / vote / public / night / reason / thought
+'''),
+    code('''
+# ===== 4. 질문하기 (에이전트가 고른 도구가 함께 출력된다) =====
+for q in [
+    "경찰은 첫날 밤에 누구를 조사했고 결과가 뭐였어?",
+    "마피아는 왜 첫날 밤에 박준수를 노렸어?",
+    "정도현은 왜 1일차에 강태호에게 투표했어?",
+    "의사는 자기 자신을 보호해도 돼?",
+    "이번 판에서 오지환은 피자를 좋아했어?",   # 기록에 없는 질문
+]:
+    qa.ask(q)
+    print()
+'''),
+    md("""
+### 직접 질문하기
+
+`MY_QUESTION` 을 바꿔서 실행한다. 03 노트북에서 방금 끝난 게임에 질문하려면 같은 커널에서
+`qa_live = mafia_qa.GameQA.from_state(vs, state)` 로 만든 뒤 `qa_live.ask("...")` 를 호출한다.
+"""),
+    code('''
+# ===== 5. 직접 질문 =====
+MY_QUESTION = "의사는 누구였고 누구를 보호했어?"
+result = qa.ask(MY_QUESTION)
+'''),
+    md("""
+## 3. 정리
+
+| | 일반 챗봇 | 사회자 | 해설 에이전트 |
+|---|---|---|---|
+| 지식 | 모델이 아는 것 | 룰북 RAG | 룰북 RAG + 게임 기록 RAG + 코드 계산 |
+| 흐름 | 질문 -> 답 | 질문 -> 검색 -> 답 (고정) | 질문 -> **도구 선택** -> 검색 -> 답 |
+| 근거 | 없음 | 룰북 페이지 | 룰북 페이지, 날짜별 기록 |
+| 모를 때 | 지어낼 수 있음 | "룰북에 없다" | "기록에 없다" |
+
+한계: 8B 모델이라 "이번 판 사실 + 규칙"처럼 두 가지를 한 번에 묻으면 한쪽만 답할 때가 있다. 질문을 나눠서 하면 정확하다.
+"""),
+]
+
 save("01_create_db.ipynb", nb1)
 save("02_agent_test.ipynb", nb2)
 save("03_mafia_game.ipynb", nb3)
 save("04_langgraph_mafia.ipynb", nb4)
+save("05_ask_agent.ipynb", nb5)
 print("saved")

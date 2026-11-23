@@ -141,8 +141,38 @@ def test_speech_fixes_and_trace():
     return check("v1.3 발언 보정(3인칭/경찰 주장/몰아가기) + 사고 과정 보기(관전 전용)", ok)
 
 
+# =====================================
+# 5. 해설 에이전트의 게임 기록 문서화와 코드 계산 사실 (LLM/임베딩 없이)
+# =====================================
+def test_game_qa_docs():
+    import json
+    import mafia_qa
+    ok = True
+    log = json.loads((config.DATA_DIR / "demo" / "demo_game.json").read_text(encoding="utf-8"))
+    docs = mafia_qa.log_to_docs(log)
+    kinds = {d.metadata["kind"] for d in docs}
+    ok &= {"role", "speech", "vote", "night", "reason", "thought"} <= kinds
+    # "왜 X를 노렸어?"를 찾을 수 있도록 선택 이유에 대상(target)이 붙는가
+    kill = log["night_history"][0]["kill"]
+    ok &= any(d.metadata["kind"] == "reason" and d.metadata["target"] == kill for d in docs)
+    # 코드 계산 사실: 경찰 조사 결과와 득표 수가 실제 기록과 같은가
+    inv = log["night_history"][0]["investigation"]
+    facts = mafia_qa.player_facts(log, inv["police"])
+    ok &= ("조사한 사람 = %s" % inv["target"]) in facts and ("마피아" if inv["is_mafia"] else "마피아 아님") in facts
+    ex = log["vote_history"][0]["executed"]
+    ok &= ("받은 표 %d" % log["vote_history"][0]["counts"][ex]) in mafia_qa.player_facts(log, ex)
+    ok &= "그런 플레이어는 없습니다" in mafia_qa.player_facts(log, "홍길동")
+    # 진행 중인 게임에는 해설 에이전트를 만들 수 없다 (비밀 보호)
+    try:
+        mafia_qa.GameQA.from_state(None, core.new_game(list(config.CHARACTERS), None, 1))
+        ok = False
+    except ValueError:
+        pass
+    return check("해설 에이전트: 기록 문서화/이유-대상 연결/코드 계산 사실/종료 전 차단", ok)
+
+
 if __name__ == "__main__":
     results = [test_police_facts(), test_graph_partner_proposal(), test_consistency_guard(),
-               test_speech_fixes_and_trace()]
+               test_speech_fixes_and_trace(), test_game_qa_docs()]
     print("\n%d/%d 통과" % (sum(results), len(results)))
     sys.exit(0 if all(results) else 1)

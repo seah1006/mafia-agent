@@ -97,7 +97,27 @@ ollama pull bge-m3
 - 사고 과정은 다른 사람의 비밀을 보여 주므로 **관전 모드에서만** 켜진다. 사람이 참여하면 자동으로 꺼진다(정보 분리 원칙).
 - 발표 시간에 맞추기 위해 같은 코드로 미리 진행한 실제 한 판을 `data/demo/` 에 저장했고, `03` 노트북 3번 섹션에서 다시 출력할 수 있다(LLM 호출 없음).
 
-### 1-7. create_agent(LangChain) vs LangGraph 비교
+### 1-7. 질문에 답하는 에이전트 (05 노트북)
+사용자가 질문하면 에이전트가 RAG 로 근거를 찾아 출처와 함께 답한다.
+
+| 부분 | 검색 대상 | 흐름 |
+|---|---|---|
+| 사회자 `Moderator.explain_rule` | 룰북 규칙 페이지 (`type=rule`) | 질문 -> 검색 -> 답변 + 출처 페이지. 룰북에 없으면 "모른다" |
+| 해설 에이전트 `mafia_qa.GameQA` | 룰북 + 끝난 게임의 기록(발언, 투표, 밤 행동, 선택 이유, 속마음) | `create_agent` 가 `search_rulebook` / `search_game_log` / `player_summary` 중 필요한 도구를 골라 호출 -> 근거와 함께 답변 |
+
+- 게임 기록은 한 줄씩 문서로 나누고 `kind`, `day`, `actor`, `target` 메타데이터를 붙여 메모리 Chroma(bge-m3)에 넣는다. "경찰", "마피아" 같은 역할 이름으로도 필터 검색한다.
+- 게임 기록에는 비밀이 들어 있어 **게임이 끝난 뒤에만** 만든다(`from_state()` 는 진행 중이면 거부).
+- 에이전트가 도구 없이 답하려 하면 코드가 두 저장소를 모두 검색해 근거를 준 뒤 다시 답하게 한다.
+
+```
+[질문] 경찰은 첫날 밤에 누구를 조사했고 결과가 뭐였어?
+    ┌─ 에이전트가 고른 도구
+    │ player_summary(player='경찰')
+    └─ 6.6초
+[답변] 경찰은 첫날 밤에 강태호를 조사했고, 결과는 마피아였습니다.
+```
+
+### 1-8. create_agent(LangChain) vs LangGraph 비교
 | 구분 | LangChain `create_agent` | LangGraph `StateGraph` |
 |---|---|---|
 | 역할 | 한 명의 AI가 도구를 골라 쓰는 **개별 판단** | 게임 전체의 **진행 순서와 상태** 관리 |
@@ -149,10 +169,12 @@ flowchart LR
 | `mafia_core.py` | 규칙 엔진, 상태, PlayerView, 안전장치, GameEngine, Random/Human 컨트롤러 |
 | `mafia_agents.py` | LLMPlayer(역할별 도구), Moderator, `build_controllers` |
 | `mafia_graph.py` | LangGraph 버전의 게임 진행 그래프, 사람 입력(interrupt) 처리 |
+| `mafia_qa.py` | 질문에 답하는 해설 에이전트 (룰북 RAG + 게임 기록 RAG + 코드 계산 도구) |
 | `01_create_db.ipynb` | PDF -> 메타데이터 -> 청킹 -> 벡터 DB 구축, 필터 검색 시연 |
 | `02_agent_test.ipynb` | AI 1명 단위 테스트: 정보 분리, 발언/투표/밤 행동, 정체 노출 테스트, fallback |
 | `03_mafia_game.ipynb` | GameEngine 버전 게임 (관전 모드 / 참여 모드), 종료 후 속마음 공개 |
 | `04_langgraph_mafia.ipynb` | LangGraph 개념 설명, 그래프 시각화, 실행, human-in-the-loop, N판 통계 |
+| `05_ask_agent.ipynb` | 질문에 답하는 에이전트: 사회자 룰북 Q&A, 끝난 게임에 대한 해설 에이전트 Q&A |
 | `data/demo/` | 시연용으로 미리 진행한 실제 한 판 (진행 화면 `demo_game.txt`, 로그 `demo_game.json`) |
 | `tests/` | 코어/에이전트 자동 테스트 |
 | `requirements.txt` | 고정된 패키지 버전 |
@@ -189,6 +211,7 @@ ollama pull bge-m3
 | 2 | `02_agent_test.ipynb` | AI 1명 동작/정보 분리 확인 | LLM 호출 수 회 |
 | 3 | `03_mafia_game.ipynb` | 한 판 진행 (관전/참여) | 관전 한 판은 수 분 소요 |
 | 4 | `04_langgraph_mafia.ipynb` | LangGraph 버전, 통계 | 통계 셀의 N은 작게 시작 |
+| 5 | `05_ask_agent.ipynb` | 질문에 답하는 에이전트 (사회자, 해설) | 질문당 약 10~25초 |
 
 LLM 없이 규칙만 빠르게 확인하고 싶으면 `RandomController`를 쓰면 된다 (`04` 노트북의 빠른 테스트 셀 참고).
 
@@ -198,6 +221,7 @@ LLM 없이 규칙만 빠르게 확인하고 싶으면 `RandomController`를 쓰�
 
 ## 5. 시연 시나리오 (발표용)
 
+0. **질문 -> RAG -> 답변 에이전트**: `05`에서 사회자에게 규칙을 묻고(출처 페이지), 해설 에이전트에게 "경찰은 누구를 조사했어?", "마피아는 왜 박준수를 노렸어?"를 물어 에이전트가 도구를 골라 답하는 것을 보여줌.
 1. **RAG**: `01`에서 "경찰은 누구를 조사할 수 있나?"(type=rule), 같은 질문을 마피아 전략 필터로 검색해 결과가 달라지는 것을 보여줌.
 2. **정보 분리**: `02`에서 마피아 AI의 `PlayerView`와 시민 AI의 `PlayerView`를 나란히 출력해 시민 쪽에 동료 정보가 없음을 확인.
 3. **정체 노출 방어**: `02`의 leak test - 마피아가 "나 마피아야"라고 말하는 출력을 코드가 차단.
@@ -231,3 +255,4 @@ LLM 없이 규칙만 빠르게 확인하고 싶으면 `RandomController`를 쓰�
 - 첫날 토론은 정보가 없어서 한 사람에게 질문이 몰리는 '따라가기'가 자주 생긴다. 경찰이 조사 결과를 공개해도 다른 AI 가 무시하는 경우가 있다.
 - 발언 안의 논리 모순(예: 경찰이 확인된 시민을 말로 의심)은 투표처럼 코드로 막지 못한다. 투표는 막는다.
 - 한 판에 수 분이 걸릴 수 있다. 시연은 `DISCUSSION_ROUNDS = 1`을 권장한다.
+- 해설 에이전트는 "이번 판 사실 + 규칙"을 한 질문에 함께 물으면 한쪽만 답할 때가 있다(8B 모델의 도구 선택 한계). 질문을 나누면 정확하다.
