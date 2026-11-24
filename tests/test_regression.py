@@ -171,8 +171,36 @@ def test_game_qa_docs():
     return check("해설 에이전트: 기록 문서화/이유-대상 연결/코드 계산 사실/종료 전 차단", ok)
 
 
+def test_game_qa_team_facts():
+    """해설 에이전트가 '마피아 1명'이라고 답하던 문제: 판 요약과 역할/팀 이름 해석이 두 명을 모두 돌려주는가"""
+    import json
+    import types
+    import mafia_qa
+    log = json.loads((config.DATA_DIR / "demo" / "demo_game.json").read_text(encoding="utf-8"))
+    mafia = [p["name"] for p in log["players"] if p["role"] == "mafia"]
+    summary = mafia_qa.game_summary(log)
+    ok = ("마피아팀 %d명" % len(mafia)) in summary and all(n in summary for n in mafia)
+    # 처형은 '투표로 처형', 밤 사망은 '밤에 사망'으로 정확히 구분되는가
+    for e in log["public_log"]:
+        if e.get("type") == "execution":
+            ok &= ("%d일차 투표: %s" % (e["day"], e["target"])) in summary
+        if e.get("type") == "death":
+            ok &= ("%d일차 밤: %s" % (e["day"], e["target"])) in summary
+    # 밤마다 경찰 조사 결과가 요약에 그대로 들어가는가 (검색에 '조사 이유'만 걸려 결과를 지어내던 문제)
+    for nh in log["night_history"]:
+        inv = nh.get("investigation")
+        if inv:
+            ok &= ("경찰 %s의 조사: %s -> %s" % (inv["police"], inv["target"], "마피아" if inv["is_mafia"] else "마피아 아님")) in summary
+    fake = types.SimpleNamespace(log=log, names=[p["name"] for p in log["players"]], _player=lambda t: None)
+    for word in ("마피아", "마피아들", "마피아팀", "마피아 팀", "마피아는"):
+        ok &= sorted(mafia_qa.GameQA._players(fake, word)) == sorted(mafia)
+    ok &= len(mafia_qa.GameQA._players(fake, "모든 플레이어")) == len(log["players"])
+    ok &= len(mafia_qa.GameQA._players(fake, "시민팀")) == len(log["players"]) - len(mafia)
+    return check("해설 에이전트: 판 요약(팀 인원/명단/사망 시점) + '마피아들/마피아팀' 해석", ok, summary)
+
+
 if __name__ == "__main__":
     results = [test_police_facts(), test_graph_partner_proposal(), test_consistency_guard(),
-               test_speech_fixes_and_trace(), test_game_qa_docs()]
+               test_speech_fixes_and_trace(), test_game_qa_docs(), test_game_qa_team_facts()]
     print("\n%d/%d 통과" % (sum(results), len(results)))
     sys.exit(0 if all(results) else 1)

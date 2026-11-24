@@ -27,6 +27,8 @@ REASON_RE = re.compile(r"^\[(밤 처치 선택|밤 보호 선택|밤 조사 선�
 REASON_KO = {"밤 처치 선택": "밤에 처치 대상으로", "밤 보호 선택": "밤에 보호 대상으로", "밤 조사 선택": "밤에 조사 대상으로",
              "투표": "투표 대상으로", "재투표": "재투표 대상으로"}
 ROLE_WORDS = {"마피아": "mafia", "경찰": "police", "의사": "doctor", "시민": "citizen"}
+ALL_WORDS = ("전체", "모두", "모든", "전원", "다들", "all")
+WINNER_KO = {"citizen": "시민팀 승리", "mafia": "마피아팀 승리", "draw": "무승부"}
 
 
 # =====================================
@@ -101,18 +103,74 @@ def build_game_db(log):
 
 
 # =====================================
-# 2. 코드가 계산하는 플레이어 요약 (LLM 없이 정확한 사실)
+# 2. 코드가 계산하는 사실 (LLM 없이 정확한 사실)
 # =====================================
+def player_fates(log):
+    """이름 -> '1일차 밤에 사망' / '2일차 투표로 처형' (살아남은 사람은 없음)"""
+    fate = {}
+    for e in log["public_log"]:
+        if e.get("type") in ("death", "execution") and e.get("target"):
+            fate[e["target"]] = "%d일차 %s" % (e["day"], "밤에 사망" if e["type"] == "death" else "투표로 처형")
+    return fate
+
+
+def game_summary(log):
+    """판 전체의 확정 사실: 결과, 팀별 명단과 인원, 날짜별 사망/처형. '마피아는 몇 명/누구' 같은 질문의 근거."""
+    role = {p["name"]: p["role"] for p in log["players"]}
+    fate = player_fates(log)
+
+    def names(r):
+        return [n for n in role if role[n] == r]
+
+    def fmt(ns):
+        return ", ".join("%s(%s)" % (n, fate.get(n, "끝까지 생존")) for n in ns) or "없음"
+
+    town = [n for n in role if role[n] != "mafia"]
+    lines = ["결과: %s (%s일차에 종료)" % (WINNER_KO.get(log.get("winner"), "진행 중"), log.get("day")),
+             "마피아팀 %d명: %s" % (len(names("mafia")), fmt(names("mafia"))),
+             "시민팀 %d명: 경찰 %s / 의사 %s / 시민 %d명 %s" % (
+                 len(town), fmt(names("police")), fmt(names("doctor")), len(names("citizen")), fmt(names("citizen")))]
+    executed = {e["day"]: e["target"] for e in log["public_log"] if e.get("type") == "execution"}
+    voted_days = {vh["day"] for vh in log["vote_history"]}
+    for nh in log["night_history"]:
+        d = nh["day"]
+        if nh.get("saved"):
+            result = "의사가 살려서 사망자 없음"
+        elif nh.get("killed"):
+            result = "%s(%s) 사망" % (nh["killed"], config.ROLE_KO[role[nh["killed"]]])
+        else:
+            result = "사망자 없음"
+        acts = ["마피아 처치 대상 %s" % (nh.get("kill") or "없음")]
+        if nh.get("protect"):
+            acts.append("의사 보호 대상 %s" % nh["protect"])
+        inv = nh.get("investigation")
+        if inv:
+            acts.append("경찰 %s의 조사: %s -> %s" % (inv["police"], inv["target"], "마피아" if inv["is_mafia"] else "마피아 아님"))
+        lines.append("%d일차 밤: %s (%s)" % (d, result, " / ".join(acts)))
+        if d in executed:
+            lines.append("%d일차 투표: %s(%s) 처형" % (d, executed[d], config.ROLE_KO[role[executed[d]]]))
+        elif d in voted_days:
+            lines.append("%d일차 투표: 처형 없음(동점)" % d)
+    # 8B 모델이 기록을 보고 세는 것을 자주 틀리므로 횟수와 승리 이유도 코드가 계산한다
+    saves = [nh["day"] for nh in log["night_history"] if nh.get("saved")]
+    lines.append("의사가 처치를 막아 살린 횟수: %d번%s" % (len(saves), " (%s)" % ", ".join("%d일차 밤" % d for d in saves) if saves else ""))
+    alive = [n for n in role if n not in fate]
+    am = [n for n in alive if role[n] == "mafia"]
+    at = [n for n in alive if role[n] != "mafia"]
+    lines.append("최종 생존자: 마피아 %d명(%s) / 시민팀 %d명(%s)" % (len(am), ", ".join(am) or "없음", len(at), ", ".join(at) or "없음"))
+    reason = {"citizen": "마피아가 모두 제거되어 시민팀 승리",
+              "mafia": "살아있는 마피아 수(%d)가 시민팀 수(%d) 이상이 되어 마피아팀 승리" % (len(am), len(at)),
+              "draw": "제한 일수를 넘겨 무승부"}.get(log.get("winner"))
+    if reason:
+        lines.append("승부가 난 이유: " + reason)
+    return "\n".join(lines)
+
+
 def player_facts(log, name):
     role = {p["name"]: p["role"] for p in log["players"]}
     if name not in role:
         return "그런 플레이어는 없습니다. 참가자: " + ", ".join(role)
-    lines = ["%s: %s" % (name, config.ROLE_KO[role[name]])]
-    for e in log["public_log"]:
-        if e.get("target") == name and e.get("type") in ("death", "execution"):
-            lines.append("%d일차 %s" % (e["day"], "밤에 사망" if e["type"] == "death" else "투표로 처형"))
-    if len(lines) == 1:
-        lines.append("끝까지 생존")
+    lines = ["%s: %s" % (name, config.ROLE_KO[role[name]]), player_fates(log).get(name, "끝까지 생존")]
     for vh in log["vote_history"]:
         mine = vh["votes"].get(name)
         got = sorted(v for v, t in vh["votes"].items() if t == name)
@@ -142,7 +200,10 @@ def player_facts(log, name):
 # 3. 해설 에이전트
 # =====================================
 SYSTEM = """당신은 방금 끝난 마피아 게임의 해설자입니다. 한국어로만 답하세요.
-- 답하기 전에 반드시 도구로 근거를 찾으세요. 규칙 질문은 search_rulebook, 이번 판에서 일어난 일은 search_game_log,
+- 아래 [이번 판 확정 사실]은 코드가 계산한 정답입니다. '누가 마피아였어', '마피아는 몇 명', '누가 이겼어', '언제 죽었어', '요약' 같은
+  이번 판 전체 질문은 이 사실대로 답하고, 인원과 명단을 빠짐없이 적으세요(마피아는 여러 명일 수 있습니다).
+  룰북의 일반 규칙으로 이번 판 사실을 대신하지 마세요. 질문의 전제가 이 사실과 다르면(예: 이긴 팀에게 '어떻게 졌어?') 먼저 바로잡으세요.
+- 그 밖의 내용은 답하기 전에 반드시 도구로 근거를 찾으세요. 규칙 질문은 search_rulebook, 이번 판에서 일어난 일은 search_game_log,
   특정 플레이어의 역할/투표/밤 행동 같은 정확한 사실은 player_summary 를 쓰세요.
 - 질문이 여러 부분(예: 이번 판 사실 + 규칙)으로 되어 있으면 부분마다 맞는 도구를 각각 호출하고, 모든 부분에 답하세요.
 - 규칙 질문이라도 기억으로 답하지 말고 먼저 search_rulebook 을 호출하세요.
@@ -160,12 +221,15 @@ class GameQA:
         self.rule_vs = rule_vs
         self.log = log
         self.names = [p["name"] for p in log["players"]]
+        self.summary = game_summary(log)
+        # 판 전체 확정 사실은 항상 보이도록 시스템 프롬프트에 넣는다 (검색에 한 명만 걸려 '마피아 1명'이라고 답하는 문제 방지)
+        self.system = SYSTEM + "\n\n[이번 판 확정 사실 (코드 계산)]\n" + self.summary
         self.game_vs = build_game_db(log)
         self.llm = llm or mafia_agents.make_llm(0.0)   # 해설은 사실 위주: 온도 0
         self.printer = printer
         self.calls = []        # 이번 질문에서 에이전트가 호출한 도구
         self.tools = self._make_tools()
-        self.agent = create_agent(self.llm, tools=self.tools, system_prompt=SYSTEM)
+        self.agent = create_agent(self.llm, tools=self.tools, system_prompt=self.system)
 
     @classmethod
     def from_file(cls, rule_vs, path, **kw):
@@ -187,10 +251,22 @@ class GameQA:
         """이름 또는 역할 이름('경찰', '마피아')을 플레이어 목록으로 바꾼다(게임이 끝났으므로 역할 사용 가능)."""
         if not text:
             return []
-        role = ROLE_WORDS.get(str(text).strip())
+        t = str(text).strip()
+        role = ROLE_WORDS.get(t)
         if role:
             return [p["name"] for p in self.log["players"] if p["role"] == role]
-        who = self._player(text)
+        named = [n for n in self.names if n in t]          # "강태호, 윤서진" 처럼 여러 이름
+        if named:
+            return named
+        compact = t.replace(" ", "")
+        if any(w in compact for w in ALL_WORDS):
+            return list(self.names)
+        if "시민팀" in compact:                            # 시민팀 = 경찰 + 의사 + 시민
+            return [p["name"] for p in self.log["players"] if p["role"] != "mafia"]
+        for word, r in ROLE_WORDS.items():                  # "마피아들", "마피아팀", "경찰은"
+            if word in compact:
+                return [p["name"] for p in self.log["players"] if p["role"] == r]
+        who = self._player(t)
         return [who] if who else []
 
     def _search_rulebook(self, question):
@@ -224,9 +300,20 @@ class GameQA:
             """플레이어의 역할, 사망 시점, 날짜별 투표, 밤 행동(경찰 조사 결과 포함), 의심도를 코드가 계산해 돌려준다. player 에는 이름 또는 '경찰' 같은 역할 이름."""
             qa.calls.append(("player_summary", {"player": player}))
             who = qa._players(player)
-            return "\n\n".join(player_facts(qa.log, w) for w in who) if who else player_facts(qa.log, player)
+            if not who:
+                return player_facts(qa.log, player)
+            body = "\n\n".join(player_facts(qa.log, w) for w in who)
+            if len(who) > 1:   # 역할/팀으로 물으면 인원과 명단을 먼저 알려 준다
+                body = "'%s' 에 해당하는 사람 %d명: %s\n\n%s" % (player, len(who), ", ".join(who), body)
+            return body
 
-        return [search_rulebook, search_game_log, player_summary]
+        @tool
+        def game_overview() -> str:
+            """이번 판 전체 요약(승자, 팀별 명단과 인원, 날짜별 사망/처형)을 코드가 계산해 돌려준다. '누가 마피아였어', '몇 명', '요약', '누가 이겼어' 질문에 쓴다."""
+            qa.calls.append(("game_overview", {}))
+            return qa.summary
+
+        return [search_rulebook, search_game_log, player_summary, game_overview]
 
     # ----- 3-2. 질문 -----
     def _fallback(self, question):
@@ -234,7 +321,7 @@ class GameQA:
         ctx = ("[룰북]\n" + self._search_rulebook(question) +
                "\n\n[이번 판 기록]\n" + self._search_game_log(question))
         self.calls.append(("(코드) 룰북 + 게임 기록 모두 검색", {"question": question}))
-        msg = [("system", SYSTEM), ("user", "[검색 결과]\n" + ctx + "\n\n[질문] " + question)]
+        msg = [("system", self.system), ("user", "[검색 결과]\n" + ctx + "\n\n[질문] " + question)]
         return self.llm.invoke(msg).content.strip()
 
     def ask(self, question, show=True):
