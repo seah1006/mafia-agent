@@ -30,6 +30,22 @@ ollama pull bge-m3
 
 **PC 사이 동기화:** 작업 시작 전 `git pull --ff-only`, 작업을 마친 뒤 변경 파일을 `git add`하고 `git commit`, `git push`한다. `.venv/`, `vector_db/`, `logs/`와 Ollama 모델은 Git으로 옮기지 않는다. 노트북을 실행하면 출력도 바뀌므로 `git status`로 커밋할 파일을 확인한다.
 
+## 터미널에서 한 번에 실행하기
+
+노트북 없이 터미널 한 줄로 실행할 수 있다. Ollama 앱이 켜져 있어야 하고, 벡터 DB 가 없으면 처음 실행 때 자동으로 만든다.
+
+```bat
+run.bat            :: 메뉴에서 고르기
+run.bat watch      :: 관전 모드: AI 8명 + 사고 과정 보기 (한 판 4~10분)
+run.bat watch --quiet --seed 11   :: 사고 과정 없이, 같은 배정으로
+run.bat play       :: 참여 모드: 나 1명 + AI 7명 ('?질문' 으로 사회자에게 규칙 문의)
+run.bat replay     :: 녹화된 실제 한 판 다시 보기 (LLM 호출 없음, 즉시)
+run.bat ask        :: 질문하기: 해설 에이전트(녹화된 판) + 사회자(룰북)
+```
+
+- `run.bat` 은 `.venv` -> 상위 폴더 `venv`(수업용) -> `python` 순서로 파이썬을 찾아 `play.py` 를 실행한다. PowerShell 터미널이면 `.\run.bat` 처럼 앞에 `.\` 를 붙인다.
+- 관전/참여 판이 끝나면 역할과 속마음을 공개하고, 그 판에 대해 해설 에이전트에게 바로 질문할 수 있다.
+
 ## 1. 구현 컨셉
 
 ### 1-1. LLM은 연기, 진실은 코드가 지킨다
@@ -169,6 +185,7 @@ flowchart LR
 | `mafia_core.py` | 규칙 엔진, 상태, PlayerView, 안전장치, GameEngine, Random/Human 컨트롤러 |
 | `mafia_agents.py` | LLMPlayer(역할별 도구), Moderator, `build_controllers` |
 | `mafia_graph.py` | LangGraph 버전의 게임 진행 그래프, 사람 입력(interrupt) 처리 |
+| `play.py`, `run.bat` | 터미널 실행기 (관전 / 참여 / 녹화 재생 / 질문하기) |
 | `mafia_qa.py` | 질문에 답하는 해설 에이전트 (룰북 RAG + 게임 기록 RAG + 코드 계산 도구) |
 | `01_create_db.ipynb` | PDF -> 메타데이터 -> 청킹 -> 벡터 DB 구축, 필터 검색 시연 |
 | `02_agent_test.ipynb` | AI 1명 단위 테스트: 정보 분리, 발언/투표/밤 행동, 정체 노출 테스트, fallback |

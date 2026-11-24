@@ -4,3 +4,4 @@
 *.ps1 text
 *.pdf binary
 *.pptx binary
+*.bat text eol=crlf
