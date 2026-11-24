@@ -6,7 +6,7 @@
 ## 집 PC에서 이어서 작업하기 (Windows)
 
 1. [Git for Windows](https://git-scm.com/install/windows), [Python 3.11.9](https://www.python.org/downloads/release/python-3119/), [Ollama](https://ollama.com/download/windows), VS Code(Python·Jupyter 확장)를 준비한다. Ollama 앱을 켜 둔다.
-2. 비공개 저장소에 접근 가능한 GitHub 계정(`seah1006`)으로 인증하고, 아래 명령을 실행한다. 브라우저 로그인 창이 뜨면 같은 계정으로 로그인한다.
+2. 아래 명령을 실행한다. 공개 저장소라 내려받기(clone, pull)에는 로그인이 필요 없고, 올리기(push)할 때만 GitHub 계정(`seah1006`)으로 로그인한다.
 
 ```powershell
 git clone https://github.com/seah1006/mafia-agent.git
