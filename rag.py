@@ -15,6 +15,8 @@ from langchain_chroma import Chroma
 import config
 
 COLLECTION = "mafia_rulebook"
+BACKGROUND_COLLECTION = "mafia_background"      # 외부 자료(위키백과). 룰북과 컨렉션을 나눠 기존 필터 검색에 섞이지 않게 한다
+EXTERNAL_DIR = config.DATA_DIR / "external"
 
 
 # =====================================
@@ -45,6 +47,38 @@ def load_pdf_with_meta(pdf_path=config.PDF_PATH):
         doc.metadata.update(
             {"type": meta["type"], "role": meta["role"], "name": meta["name"], "title": meta["title"]}
         )
+    return docs
+
+
+def load_external_docs(ext_dir=EXTERNAL_DIR):
+    """data/external/*.md (위키백과 발췌) 를 절(##) 단위 Document 로 읽는다.
+    파일 머리의 '- 출처:' / '- Source:' 줄에서 URL 을, 첫 줄 '# 제목' 에서 출처 이름을 가져온다."""
+    docs = []
+    for path in sorted(Path(ext_dir).glob("*.md")):
+        if path.name.lower() == "readme.md":   # 출처/라이선스 안내 파일은 검색 대상이 아니다
+            continue
+        lines = path.read_text(encoding="utf-8").splitlines()
+        title = lines[0].lstrip("# ").strip()
+        url = next((ln.split(":", 1)[1].strip() for ln in lines
+                    if ln.startswith("- 출처:") or ln.startswith("- Source:")), "")
+        body_start = next(i for i, ln in enumerate(lines[1:], 1) if ln.startswith("## ") or
+                          (ln.strip() and not ln.startswith("- ") and not ln.startswith("#")))
+        section, buf = "개요", []
+
+        def flush():
+            text = "\n".join(buf).strip()
+            if text:
+                docs.append(Document(page_content=text, metadata={
+                    "type": "background", "source": title, "section": section, "url": url,
+                    "file": path.name, "lang": "ko" if "_ko_" in path.name else "en"}))
+
+        for ln in lines[body_start:]:
+            if ln.startswith("## "):
+                flush()
+                section, buf = ln.lstrip("# ").strip(), []
+            else:
+                buf.append(ln.lstrip("# ") if ln.startswith("#") else ln)
+        flush()
     return docs
 
 
@@ -116,6 +150,32 @@ def build_db(pdf_path=config.PDF_PATH, db_dir=config.DB_DIR, reset=True):
                     embedding_function=_embeddings())
     vs.add_documents(chunks)
     return vs
+
+
+def load_background_db(db_dir=config.DB_DIR):
+    """외부 자료(위키백과) 컬렉션. 비어 있거나 파일이 바뀌어 chunk 수가 다르면 다시 만든다(처음 한 번 수 초)."""
+    chunks = split_background(load_external_docs())
+    vs = Chroma(collection_name=BACKGROUND_COLLECTION, persist_directory=str(db_dir),
+                embedding_function=_embeddings())
+    if vs._collection.count() != len(chunks):
+        vs.delete_collection()
+        vs = Chroma(collection_name=BACKGROUND_COLLECTION, persist_directory=str(db_dir),
+                    embedding_function=_embeddings())
+        if chunks:
+            vs.add_documents(chunks)
+    return vs
+
+
+def split_background(docs):
+    """본문을 먼저 자른 뒤, 조각마다 '[출처 · 절]' 머리를 붙인다 (제목만 남는 조각 방지, 검색 결과에 출처 표시)."""
+    chunks = RecursiveCharacterTextSplitter(chunk_size=450, chunk_overlap=50).split_documents(docs)
+    for ch in chunks:
+        ch.page_content = "[%s · %s] %s" % (ch.metadata["source"], ch.metadata["section"], ch.page_content)
+    return chunks
+
+
+def search_background(vs, query, k=3):
+    return vs.similarity_search(query, k=k)
 
 
 def load_db(db_dir=config.DB_DIR):

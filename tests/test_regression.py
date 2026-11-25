@@ -190,7 +190,19 @@ def test_game_qa_team_facts():
     for nh in log["night_history"]:
         inv = nh.get("investigation")
         if inv:
-            ok &= ("경찰 %s의 조사: %s -> %s" % (inv["police"], inv["target"], "마피아" if inv["is_mafia"] else "마피아 아님")) in summary
+            ok &= ("경찰 %s이(가) 조사한 사람: %s -> %s" % (inv["police"], inv["target"], "마피아" if inv["is_mafia"] else "마피아 아님")) in summary
+    # 의사가 보호한 사람이 날짜와 함께 한 줄에 모여 있는가 ('의사는 박준수를 보호'처럼 잘못 읽던 문제)
+    doc = [p["name"] for p in log["players"] if p["role"] == "doctor"][0]
+    prot_line = next(ln for ln in summary.splitlines() if ln.startswith("의사 %s이(가) 보호한 사람 모음" % doc))
+    ok &= all(("%d일차 밤 %s" % (nh["day"], nh["protect"])) in prot_line for nh in log["night_history"] if nh.get("protect"))
+    # 외부 자료: 출처·라이선스가 있고, 훼손된 판(창안자 왜곡)이 아닌 정상 판을 썼는가
+    import rag
+    ext = rag.load_external_docs()
+    ok &= len(ext) > 0 and all(d.metadata["type"] == "background" and d.metadata["url"].startswith("https://") for d in ext)
+    ko_text = " ".join(d.page_content for d in ext if d.metadata["lang"] == "ko")
+    ok &= "1986" in ko_text and "최진우" not in ko_text
+    ok &= all("CC BY-SA 4.0" in p.read_text(encoding="utf-8") for p in rag.EXTERNAL_DIR.glob("wikipedia_*.md"))
+    ok &= all(d.metadata["file"].startswith("wikipedia_") for d in ext)   # 안내용 README 는 들어가지 않는다
     fake = types.SimpleNamespace(log=log, names=[p["name"] for p in log["players"]], _player=lambda t: None)
     for word in ("마피아", "마피아들", "마피아팀", "마피아 팀", "마피아는"):
         ok &= sorted(mafia_qa.GameQA._players(fake, word)) == sorted(mafia)

@@ -119,7 +119,18 @@ run.bat ask        :: 질문하기: 해설 에이전트(녹화된 판) + 사회�
 | 부분 | 검색 대상 | 흐름 |
 |---|---|---|
 | 사회자 `Moderator.explain_rule` | 룰북 규칙 페이지 (`type=rule`) | 질문 -> 검색 -> 답변 + 출처 페이지. 룰북에 없으면 "모른다" |
-| 해설 에이전트 `mafia_qa.GameQA` | 룰북 + 끝난 게임의 기록(발언, 투표, 밤 행동, 선택 이유, 속마음) | `create_agent` 가 `search_rulebook` / `search_game_log` / `player_summary` 중 필요한 도구를 골라 호출 -> 근거와 함께 답변 |
+| 해설 에이전트 `mafia_qa.GameQA` | 룰북 + 끝난 게임의 기록(발언, 투표, 밤 행동, 선택 이유, 속마음) + **외부 자료(위키백과)** | `create_agent` 가 `search_rulebook` / `search_game_log` / `player_summary` / `game_overview` / `search_background` 중 필요한 도구를 골라 호출 -> 근거와 함께 답변 |
+
+**지식 저장소 3가지**
+
+| 저장소 | 내용 | 어디서 왔나 |
+|---|---|---|
+| 룰북 (`mafia_rulebook`) | 우리 게임의 규칙 · 역할 전략 · 캐릭터 (16쪽, 23 chunk) | 이 과제를 위해 직접 작성한 PDF |
+| 외부 자료 (`mafia_background`) | 마피아 게임의 유래, 변형 규칙, 게임 이론, AI 연구 (74 chunk) | 위키백과 한국어·영어 문서 (CC BY-SA 4.0, `data/external/README.md`) |
+| 게임 기록 (메모리) | 발언, 투표, 밤 행동, 선택 이유, 속마음 (녹화된 판 68개 문서) | 에이전트들이 직접 게임하며 만든 로그 |
+
+- 우리 게임의 규칙은 룰북이 기준이다. 위키백과의 규칙은 다른 변형일 수 있어 게임 AI 와 사회자는 외부 자료를 보지 않고, 해설 에이전트만 "게임 일반 지식" 질문에 쓴다. 컨렉션을 나눠 기존 메타데이터 필터 검색에 섞이지 않는다.
+- 한국어 위키백과의 최신 판은 창안자와 연도가 훼손돼 있어("2023년 학생이 창안") 훼손 직전의 정상 판을 쓰고 영어 문서와 교차 확인했다. 외부 데이터는 그대로 믿지 않고 검증해서 넣어야 한다는 사례.
 
 - 게임 기록은 한 줄씩 문서로 나누고 `kind`, `day`, `actor`, `target` 메타데이터를 붙여 메모리 Chroma(bge-m3)에 넣는다. "경찰", "마피아" 같은 역할 이름으로도 필터 검색한다.
 - 게임 기록에는 비밀이 들어 있어 **게임이 끝난 뒤에만** 만든다(`from_state()` 는 진행 중이면 거부).
@@ -194,6 +205,7 @@ flowchart LR
 | `04_langgraph_mafia.ipynb` | LangGraph 개념 설명, 그래프 시각화, 실행, human-in-the-loop, N판 통계 |
 | `05_ask_agent.ipynb` | 질문에 답하는 에이전트: 사회자 룰북 Q&A, 끝난 게임에 대한 해설 에이전트 Q&A |
 | `data/demo/` | 시연용으로 미리 진행한 실제 한 판 (진행 화면 `demo_game.txt`, 로그 `demo_game.json`) |
+| `data/external/` | 외부 자료: 위키백과 「마피아 (게임)」 한국어·영어 발췌 (CC BY-SA 4.0, 출처·판 번호는 폴더의 README) |
 | `tests/` | 코어/에이전트 자동 테스트 |
 | `requirements.txt` | 고정된 패키지 버전 |
 | `vector_db/`, `logs/` | 실행 시 생성되는 벡터 DB와 게임 로그 |

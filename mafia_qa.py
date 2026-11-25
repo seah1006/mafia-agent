@@ -5,6 +5,8 @@
 #   - search_rulebook : 룰북 PDF RAG (type=rule 필터)                -> 규칙 질문
 #   - search_game_log : 이번 판 기록 RAG (발언/투표/밤 행동/속마음)    -> "왜 그랬어?" 같은 질문
 #   - player_summary  : 코드가 계산한 플레이어별 사실(역할, 투표, 밤 행동) -> 정확한 사실 확인
+#   - game_overview   : 코드가 계산한 판 전체 요약(팀 명단/인원, 사망 시점, 승리 이유)
+#   - search_background : 외부 자료(위키백과 마피아 게임 문서) RAG -> 유래, 변형 규칙, 게임 이론, AI 연구
 # 게임 기록에는 비밀(밤 행동, 속마음)이 들어 있으므로 게임이 끝난 뒤에만 만든다(정보 분리 원칙).
 import dataclasses
 import re
@@ -130,6 +132,7 @@ def game_summary(log):
              "마피아팀 %d명: %s" % (len(names("mafia")), fmt(names("mafia"))),
              "시민팀 %d명: 경찰 %s / 의사 %s / 시민 %d명 %s" % (
                  len(town), fmt(names("police")), fmt(names("doctor")), len(names("citizen")), fmt(names("citizen")))]
+    doctor = (names("doctor") or ["?"])[0]
     executed = {e["day"]: e["target"] for e in log["public_log"] if e.get("type") == "execution"}
     voted_days = {vh["day"] for vh in log["vote_history"]}
     for nh in log["night_history"]:
@@ -140,17 +143,26 @@ def game_summary(log):
             result = "%s(%s) 사망" % (nh["killed"], config.ROLE_KO[role[nh["killed"]]])
         else:
             result = "사망자 없음"
-        acts = ["마피아 처치 대상 %s" % (nh.get("kill") or "없음")]
+        acts = ["마피아가 노린 사람: %s" % (nh.get("kill") or "없음")]
         if nh.get("protect"):
-            acts.append("의사 보호 대상 %s" % nh["protect"])
+            acts.append("의사 %s이(가) 보호한 사람: %s" % (doctor, nh["protect"]))
         inv = nh.get("investigation")
         if inv:
-            acts.append("경찰 %s의 조사: %s -> %s" % (inv["police"], inv["target"], "마피아" if inv["is_mafia"] else "마피아 아님"))
+            acts.append("경찰 %s이(가) 조사한 사람: %s -> %s" % (inv["police"], inv["target"], "마피아" if inv["is_mafia"] else "마피아 아님"))
         lines.append("%d일차 밤: %s (%s)" % (d, result, " / ".join(acts)))
         if d in executed:
             lines.append("%d일차 투표: %s(%s) 처형" % (d, executed[d], config.ROLE_KO[role[executed[d]]]))
         elif d in voted_days:
             lines.append("%d일차 투표: 처형 없음(동점)" % d)
+    # 역할별 모음: '의사는 누구를 보호했어?' 같은 질문을 한 줄에서 바로 답할 수 있게 한다
+    prot = ["%d일차 밤 %s%s" % (nh["day"], nh["protect"], "(자기 자신)" if nh["protect"] == doctor else "")
+            for nh in log["night_history"] if nh.get("protect")]
+    lines.append("의사 %s이(가) 보호한 사람 모음: %s" % (doctor, ", ".join(prot) or "없음"))
+    invs = ["%d일차 밤 %s -> %s" % (nh["day"], nh["investigation"]["target"], "마피아" if nh["investigation"]["is_mafia"] else "마피아 아님")
+            for nh in log["night_history"] if nh.get("investigation")]
+    lines.append("경찰 %s의 조사 모음: %s" % ((names("police") or ["?"])[0], ", ".join(invs) or "없음"))
+    kills = ["%d일차 밤 %s" % (nh["day"], nh["kill"]) for nh in log["night_history"] if nh.get("kill")]
+    lines.append("마피아가 노린 사람 모음: %s" % (", ".join(kills) or "없음"))
     # 8B 모델이 기록을 보고 세는 것을 자주 틀리므로 횟수와 승리 이유도 코드가 계산한다
     saves = [nh["day"] for nh in log["night_history"] if nh.get("saved")]
     lines.append("의사가 처치를 막아 살린 횟수: %d번%s" % (len(saves), " (%s)" % ", ".join("%d일차 밤" % d for d in saves) if saves else ""))
@@ -207,6 +219,9 @@ SYSTEM = """당신은 방금 끝난 마피아 게임의 해설자입니다. 한�
   특정 플레이어의 역할/투표/밤 행동 같은 정확한 사실은 player_summary 를 쓰세요.
 - 질문이 여러 부분(예: 이번 판 사실 + 규칙)으로 되어 있으면 부분마다 맞는 도구를 각각 호출하고, 모든 부분에 답하세요.
 - 규칙 질문이라도 기억으로 답하지 말고 먼저 search_rulebook 을 호출하세요.
+- 마피아 게임 자체에 대한 일반 지식(누가 만들었는지, 역사, 늑대인간 같은 변형, 다른 역할, 게임 이론, AI 연구)은
+  search_background(외부 자료: 위키백과)를 쓰고, 근거에 '위키백과(절 이름)'을 적으세요. 외부 자료가 영어여도 답은 한국어로 하세요.
+  우리 게임의 규칙은 룰북이 기준입니다. 위키백과의 규칙은 다른 변형일 수 있으니 우리 규칙인 것처럼 말하지 마세요.
 - "왜 ~했어?" 질문은 그 사람의 '고른 이유'나 '속마음' 기록을 근거로 답하세요. 그 사람이 당시 몰랐던 사실(다른 사람의 역할 등)을 이유로 만들지 마세요.
 - "왜 처형됐어/왜 들켰어"처럼 다른 사람들의 판단을 묻는 질문은 search_game_log 로 그 사람을 지목한 발언과 투표 이유를 찾으세요.
 - 조사 결과, 득표 수, 사망 시점 같은 핵심 사실은 빠뜨리지 마세요. 도구 결과의 이름을 그대로 옮기세요.
@@ -225,6 +240,7 @@ class GameQA:
         # 판 전체 확정 사실은 항상 보이도록 시스템 프롬프트에 넣는다 (검색에 한 명만 걸려 '마피아 1명'이라고 답하는 문제 방지)
         self.system = SYSTEM + "\n\n[이번 판 확정 사실 (코드 계산)]\n" + self.summary
         self.game_vs = build_game_db(log)
+        self.bg_vs = rag.load_background_db()   # 외부 자료(위키백과). 처음 한 번만 임베딩
         self.llm = llm or mafia_agents.make_llm(0.0)   # 해설은 사실 위주: 온도 0
         self.printer = printer
         self.calls = []        # 이번 질문에서 에이전트가 호출한 도구
@@ -273,6 +289,10 @@ class GameQA:
         docs = rag.search_rules(self.rule_vs, question, k=3)
         return "\n\n".join("(룰북 p.%d) %s" % (d.metadata["page"] + 1, d.page_content[:400]) for d in docs)
 
+    def _search_background(self, question, k=3):
+        docs = rag.search_background(self.bg_vs, question, k=k)
+        return "\n\n".join(d.page_content[:450] for d in docs) or "검색 결과 없음"
+
     def _search_game_log(self, query, player=""):
         who = self._players(player)
         flt = {"$or": [{"actor": {"$in": who}}, {"target": {"$in": who}}]} if who else None
@@ -313,14 +333,21 @@ class GameQA:
             qa.calls.append(("game_overview", {}))
             return qa.summary
 
-        return [search_rulebook, search_game_log, player_summary, game_overview]
+        @tool
+        def search_background(question: str) -> str:
+            """외부 자료(위키백과 '마피아 (게임)' 한국어·영어 문서)를 검색한다. 마피아 게임의 유래·역사, 늑대인간 같은 변형, 다른 역할, 게임 이론, AI 연구 같은 일반 지식 질문에 쓴다. 이번 판 사실이나 우리 규칙에는 쓰지 않는다."""
+            qa.calls.append(("search_background", {"question": question}))
+            return qa._search_background(question)
+
+        return [search_rulebook, search_game_log, player_summary, game_overview, search_background]
 
     # ----- 3-2. 질문 -----
     def _fallback(self, question):
         """에이전트가 도구를 안 쓰고 답하면, 코드가 두 저장소를 모두 검색해 근거를 주고 다시 답하게 한다."""
         ctx = ("[룰북]\n" + self._search_rulebook(question) +
-               "\n\n[이번 판 기록]\n" + self._search_game_log(question))
-        self.calls.append(("(코드) 룰북 + 게임 기록 모두 검색", {"question": question}))
+               "\n\n[이번 판 기록]\n" + self._search_game_log(question) +
+               "\n\n[외부 자료: 위키백과]\n" + self._search_background(question, k=2))
+        self.calls.append(("(코드) 룰북 + 게임 기록 + 외부 자료 모두 검색", {"question": question}))
         msg = [("system", self.system), ("user", "[검색 결과]\n" + ctx + "\n\n[질문] " + question)]
         return self.llm.invoke(msg).content.strip()
 
